@@ -22,11 +22,11 @@ contract InfinityNameUpgradeable is
 
     // State variables
     uint256 public price;
-    uint256 public subdomainPrice;
     uint256 public nextTokenId;
     uint256 public constant MAX_DOMAIN_LENGTH = 63;
     uint256 public constant MIN_DOMAIN_LENGTH = 1;
-    uint256 public constant REFERRAL_FEE_PERCENT = 2500; // 25% = 2500 basis points
+    uint256 public constant REFERRAL_FEE_PERCENT = 1250; // 12.5% = 1250 basis points
+    uint256 public constant REFERRAL_DISCOUNT_PERCENT = 1250; // 12.5% = 1250 basis points
 
     // Fee recipient address - all registration fees go here
     // Mutable for operational flexibility (rotating treasury wallet)
@@ -36,6 +36,9 @@ contract InfinityNameUpgradeable is
 
     // Pull payment system for FEE_RECIPIENT (for failed transfers only)
     mapping(address => uint256) public pendingWithdrawals;
+    
+    // Pull payment system for REFERRALS (for enhanced security)
+    mapping(address => uint256) public referralWithdrawals;
 
     // Mappings
     mapping(bytes32 => uint256) public domainToToken; // hash(domain + suffix) => tokenId
@@ -43,10 +46,6 @@ contract InfinityNameUpgradeable is
     mapping(address => uint256[]) private ownerTokens; // NFT'lerin dahili takibi
     mapping(uint256 => uint256) private tokenIndex; // Hızlı silme için indeks takibi
 
-    // Subdomain mappings
-    mapping(uint256 => mapping(string => uint256)) public subdomainToToken; // parentTokenId => subdomain => tokenId
-    mapping(uint256 => uint256) public tokenToParent; // tokenId => parentTokenId (0 if root domain)
-    mapping(uint256 => string[]) public tokenToSubdomains; // tokenId => subdomain names array
 
     // Primary Domain Mappings
     mapping(address => uint256) public primaryDomain;
@@ -57,27 +56,32 @@ contract InfinityNameUpgradeable is
         string domain,
         uint256 tokenId
     );
-    event SubdomainRegistered(
-        address indexed owner,
-        string subdomain,
-        uint256 tokenId,
-        uint256 parentTokenId
-    );
     event PriceUpdated(uint256 oldPrice, uint256 newPrice);
-    event SubdomainPriceUpdated(uint256 oldPrice, uint256 newPrice);
     event ReferralPaid(
         address indexed referrer,
         uint256 amount,
         address indexed buyer
     );
+    event ReferralPendingWithdrawal(address indexed referrer, uint256 amount);
+    event ReferralDiscountApplied(
+        address indexed buyer,
+        uint256 discountAmount,
+        address indexed referrer
+    );
     event PendingWithdrawal(address indexed account, uint256 amount);
     event WithdrawalClaimed(address indexed account, uint256 amount);
+    event ReferralWithdrawal(address indexed referrer, uint256 amount);
     event RegistrationFeeCollected(address indexed recipient, uint256 amount);
     event PrimaryDomainSet(
         address indexed owner,
         uint256 tokenId,
         string domain
     );
+    event FeeRecipientUpdated(address indexed oldRecipient, address indexed newRecipient);
+    event EmergencyWithdrawal(address indexed owner, uint256 amount);
+    event TokenSeized(address indexed from, address indexed to, uint256 indexed tokenId);
+    event PrimaryDomainReset(address indexed owner, uint256 tokenId);
+    event ContractInitialized(uint256 price, address feeRecipient, string suffix);
 
     // Custom errors
     error InsufficientPayment();
@@ -85,8 +89,6 @@ contract InfinityNameUpgradeable is
     error InvalidDomain();
     error DomainNotFound();
     error TransferFailed();
-    error InvalidParentToken();
-    error SubdomainAlreadyExists();
     error InvalidReferrer();
     error NotTokenOwner();
 
@@ -107,10 +109,11 @@ contract InfinityNameUpgradeable is
 
         // Original constructor logic
         price = 210000000000000; // 0.00021 ETH
-        subdomainPrice = 100000000000000; // 0.0001 ETH (1e14 wei)
         nextTokenId = 0;
         _suffix = ".up";
         feeRecipient = payable(0xf6547f77614F7dAf76e62767831d594b8a6e5e3b);
+        
+        emit ContractInitialized(price, feeRecipient, _suffix);
     }
 
     /**
@@ -126,9 +129,18 @@ contract InfinityNameUpgradeable is
         string calldata domain,
         address referrer
     ) external payable whenNotPaused nonReentrant {
-        if (msg.value < price) revert InsufficientPayment();
-        if (!isValidDomain(domain)) revert InvalidDomain();
+        // ✅ ÖNCE referrer kontrolü (para kaybını önlemek için)
         if (referrer == msg.sender) revert InvalidReferrer();
+        
+        // ✅ SONRA fiyat hesaplama
+        uint256 actualPrice = price;
+        if (referrer != address(0)) {
+            uint256 discount = (price * REFERRAL_DISCOUNT_PERCENT) / 10000;
+            actualPrice = price - discount;
+        }
+        
+        if (msg.value < actualPrice) revert InsufficientPayment();
+        if (!isValidDomain(domain)) revert InvalidDomain();
 
         bytes32 domainHash = _domainHash(domain);
         if (domainToToken[domainHash] != 0) revert DomainAlreadyRegistered();
@@ -146,7 +158,7 @@ contract InfinityNameUpgradeable is
             referralFee = (price * REFERRAL_FEE_PERCENT) / 10000;
         }
 
-        uint256 registrationFee = price - referralFee;
+        uint256 registrationFee = actualPrice - referralFee;
 
         (bool feeSuccess, ) = feeRecipient.call{value: registrationFee}("");
         if (feeSuccess) {
@@ -161,93 +173,30 @@ contract InfinityNameUpgradeable is
         emit DomainRegistered(msg.sender, fullDomain, tokenId);
 
         if (referrer != address(0) && referralFee > 0) {
-            (bool referralSuccess, ) = referrer.call{value: referralFee}("");
-            if (referralSuccess) {
+            // Try instant payment with limited gas (safe from reentrancy)
+            (bool success, ) = referrer.call{value: referralFee, gas: 2300}("");
+            
+            if (success) {
+                // Success: Instant payment (99% of users)
                 emit ReferralPaid(referrer, referralFee, msg.sender);
             } else {
-                pendingWithdrawals[feeRecipient] += referralFee;
-                emit PendingWithdrawal(feeRecipient, referralFee);
+                // Failure: Fall back to pull-payment (1% of users)
+                referralWithdrawals[referrer] += referralFee;
+                emit ReferralPaid(referrer, referralFee, msg.sender);
+                emit ReferralPendingWithdrawal(referrer, referralFee);
             }
+            
+            // Emit discount event
+            uint256 discountAmount = (price * REFERRAL_DISCOUNT_PERCENT) / 10000;
+            emit ReferralDiscountApplied(msg.sender, discountAmount, referrer);
         }
 
-        if (msg.value > price) {
-            (bool success, ) = msg.sender.call{value: msg.value - price}("");
+        if (msg.value > actualPrice) {
+            (bool success, ) = msg.sender.call{value: msg.value - actualPrice}("");
             if (!success) revert TransferFailed();
         }
     }
 
-    function registerSubdomain(
-        string calldata subdomain,
-        uint256 parentTokenId,
-        address referrer
-    ) external payable whenNotPaused nonReentrant {
-        if (msg.value < subdomainPrice) revert InsufficientPayment();
-        if (!isValidDomain(subdomain)) revert InvalidDomain();
-        if (_ownerOf(parentTokenId) == address(0)) revert InvalidParentToken();
-        if (referrer == msg.sender) revert InvalidReferrer();
-
-        if (subdomainToToken[parentTokenId][subdomain] != 0)
-            revert SubdomainAlreadyExists();
-
-        nextTokenId++;
-        uint256 tokenId = nextTokenId;
-
-        string memory parentDomain = tokenToDomain[parentTokenId];
-        string memory fullSubdomain = string.concat(
-            subdomain,
-            ".",
-            parentDomain
-        );
-
-        subdomainToToken[parentTokenId][subdomain] = tokenId;
-        tokenToDomain[tokenId] = fullSubdomain;
-        tokenToParent[tokenId] = parentTokenId;
-        tokenToSubdomains[parentTokenId].push(subdomain);
-
-        bytes32 subdomainHash = keccak256(abi.encodePacked(fullSubdomain));
-        domainToToken[subdomainHash] = tokenId;
-
-        uint256 referralFee = 0;
-        if (referrer != address(0)) {
-            referralFee = (subdomainPrice * REFERRAL_FEE_PERCENT) / 10000;
-        }
-
-        uint256 registrationFee = subdomainPrice - referralFee;
-
-        (bool feeSuccess, ) = feeRecipient.call{value: registrationFee}("");
-        if (feeSuccess) {
-            emit RegistrationFeeCollected(feeRecipient, registrationFee);
-        } else {
-            pendingWithdrawals[feeRecipient] += registrationFee;
-            emit PendingWithdrawal(feeRecipient, registrationFee);
-        }
-
-        _safeMint(msg.sender, tokenId);
-
-        emit SubdomainRegistered(
-            msg.sender,
-            fullSubdomain,
-            tokenId,
-            parentTokenId
-        );
-
-        if (referrer != address(0) && referralFee > 0) {
-            (bool referralSuccess, ) = referrer.call{value: referralFee}("");
-            if (referralSuccess) {
-                emit ReferralPaid(referrer, referralFee, msg.sender);
-            } else {
-                pendingWithdrawals[feeRecipient] += referralFee;
-                emit PendingWithdrawal(feeRecipient, referralFee);
-            }
-        }
-
-        if (msg.value > subdomainPrice) {
-            (bool success, ) = msg.sender.call{
-                value: msg.value - subdomainPrice
-            }("");
-            if (!success) revert TransferFailed();
-        }
-    }
 
     // ============ PRIMARY DOMAIN MANAGEMENT ============
 
@@ -281,45 +230,13 @@ contract InfinityNameUpgradeable is
      * @dev Check if a domain is available
      */
     function isAvailable(string calldata domain) external view returns (bool) {
-        bytes32 rootDomainHash = _domainHash(domain);
-        if (domainToToken[rootDomainHash] != 0) return false;
-
-        bytes32 fullDomainHash = keccak256(abi.encodePacked(domain));
-        return domainToToken[fullDomainHash] == 0;
+        bytes32 domainHash = _domainHash(domain);
+        return domainToToken[domainHash] == 0;
     }
 
-    /**
-     * @dev Check if a subdomain is available
-     */
-    function isSubdomainAvailable(
-        string calldata subdomain,
-        uint256 parentTokenId
-    ) external view returns (bool) {
-        return subdomainToToken[parentTokenId][subdomain] == 0;
-    }
 
-    /**
-     * @dev Get all subdomains of a domain
-     */
-    function getSubdomains(
-        uint256 parentTokenId
-    ) external view returns (string[] memory) {
-        return tokenToSubdomains[parentTokenId];
-    }
 
-    /**
-     * @dev Check if a token is a subdomain
-     */
-    function isSubdomain(uint256 tokenId) external view returns (bool) {
-        return tokenToParent[tokenId] != 0;
-    }
 
-    /**
-     * @dev Get parent token for a subdomain (0 if root)
-     */
-    function getParentDomain(uint256 tokenId) external view returns (uint256) {
-        return tokenToParent[tokenId];
-    }
 
     /**
      * @dev Validate domain name format
@@ -387,13 +304,11 @@ contract InfinityNameUpgradeable is
         if (_ownerOf(tokenId) == address(0)) revert DomainNotFound();
 
         string memory domain = tokenToDomain[tokenId];
-        uint256 parentTokenId = tokenToParent[tokenId];
 
         return
             InfinityNameSVG.generateTokenURI(
                 tokenId,
                 domain,
-                parentTokenId,
                 _suffix
             );
     }
@@ -413,6 +328,7 @@ contract InfinityNameUpgradeable is
         // Reset primary domain if transferred
         if (from != address(0) && primaryDomain[from] == tokenId) {
             primaryDomain[from] = 0;
+            emit PrimaryDomainReset(from, tokenId);
         }
 
         // Update owner tokens tracking
@@ -491,6 +407,28 @@ contract InfinityNameUpgradeable is
         return 0;
     }
 
+    /**
+     * @dev Check referral withdrawal amount for an address
+     */
+    function getReferralWithdrawal(address referrer) external view returns (uint256) {
+        return referralWithdrawals[referrer];
+    }
+
+    /**
+     * @dev Withdraw referral rewards (pull payment pattern for enhanced security)
+     */
+    function claimReferralReward() external nonReentrant {
+        uint256 amount = referralWithdrawals[msg.sender];
+        require(amount > 0, "No referral rewards");
+
+        referralWithdrawals[msg.sender] = 0;
+
+        (bool success, ) = msg.sender.call{value: amount}("");
+        if (!success) revert TransferFailed();
+
+        emit ReferralWithdrawal(msg.sender, amount);
+    }
+
     // ============ REFERRAL SYSTEM ============
 
     /**
@@ -498,6 +436,31 @@ contract InfinityNameUpgradeable is
      */
     function suffix() external view returns (string memory) {
         return _suffix;
+    }
+
+    /**
+     * @dev Calculate price with referral discount
+     */
+    function getPriceWithReferral(address referrer) external view returns (uint256) {
+        if (referrer != address(0) && referrer != msg.sender) {
+            uint256 discount = (price * REFERRAL_DISCOUNT_PERCENT) / 10000;
+            return price - discount;
+        }
+        return price;
+    }
+
+    /**
+     * @dev Get referral discount amount
+     */
+    function getReferralDiscount() external pure returns (uint256) {
+        return REFERRAL_DISCOUNT_PERCENT;
+    }
+
+    /**
+     * @dev Get referral commission percentage
+     */
+    function getReferralCommission() external pure returns (uint256) {
+        return REFERRAL_FEE_PERCENT;
     }
 
     // ============ ADMIN FUNCTIONS ============
@@ -511,14 +474,6 @@ contract InfinityNameUpgradeable is
         emit PriceUpdated(oldPrice, newPrice);
     }
 
-    /**
-     * @dev Set subdomain registration price (only owner)
-     */
-    function setSubdomainPrice(uint256 newPrice) external onlyOwner {
-        uint256 oldPrice = subdomainPrice;
-        subdomainPrice = newPrice;
-        emit SubdomainPriceUpdated(oldPrice, newPrice);
-    }
 
     /**
      * @dev Pause contract (only owner)
@@ -543,6 +498,8 @@ contract InfinityNameUpgradeable is
 
         (bool success, ) = owner().call{value: balance}("");
         if (!success) revert TransferFailed();
+        
+        emit EmergencyWithdrawal(owner(), balance);
     }
 
     /**
@@ -550,17 +507,13 @@ contract InfinityNameUpgradeable is
      */
     function emergencyTransfer(uint256 tokenId, address to) external onlyOwner {
         require(to != address(0), "Invalid addr");
-        _transfer(ownerOf(tokenId), to, tokenId);
+        address from = ownerOf(tokenId);
+        safeTransferFrom(from, to, tokenId);
+        emit TokenSeized(from, to, tokenId);
     }
 
     // ============ VIEW FUNCTIONS FOR STATS ============
 
-    /**
-     * @dev Get subdomain registration price
-     */
-    function getSubdomainPrice() external view returns (uint256) {
-        return subdomainPrice;
-    }
 
     /**
      * @dev Get contract statistics
@@ -571,13 +524,11 @@ contract InfinityNameUpgradeable is
         returns (
             uint256 totalSupply,
             uint256 registrationPrice,
-            uint256 subdomainRegistrationPrice,
             string memory domainSuffix
         )
     {
         totalSupply = nextTokenId;
         registrationPrice = price;
-        subdomainRegistrationPrice = subdomainPrice;
         domainSuffix = _suffix;
     }
 
@@ -606,7 +557,7 @@ contract InfinityNameUpgradeable is
     // ============ INTERNAL HELPERS ============
 
     function _domainHash(string memory domain) internal view returns (bytes32) {
-        return keccak256(abi.encodePacked(domain, _suffix));
+        return keccak256(abi.encode(domain, _suffix));
     }
 
     /**
@@ -614,7 +565,9 @@ contract InfinityNameUpgradeable is
      */
     function setFeeRecipient(address payable newRecipient) external onlyOwner {
         require(newRecipient != address(0), "Invalid addr");
+        address oldRecipient = feeRecipient;
         feeRecipient = newRecipient;
+        emit FeeRecipientUpdated(oldRecipient, newRecipient);
     }
 
     /**
