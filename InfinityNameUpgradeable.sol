@@ -108,7 +108,7 @@ contract InfinityNameUpgradeable is
         __UUPSUpgradeable_init();
 
         // Original constructor logic
-        price = 210000000000000; // 0.00021 ETH
+        price = 320000000000000; // 0.00032 ETH
         nextTokenId = 0;
         _suffix = ".up";
         feeRecipient = payable(0xf6547f77614F7dAf76e62767831d594b8a6e5e3b);
