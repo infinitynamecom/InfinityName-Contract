@@ -43,8 +43,8 @@ contract InfinityNameUpgradeable is
     // Mappings
     mapping(bytes32 => uint256) public domainToToken; // hash(domain + suffix) => tokenId
     mapping(uint256 => string) public tokenToDomain; // tokenId => fullDomain
-    mapping(address => uint256[]) private ownerTokens; // NFT'lerin dahili takibi
-    mapping(uint256 => uint256) private tokenIndex; // Hızlı silme için indeks takibi
+    mapping(address => uint256[]) private ownerTokens; // Internal tracking of NFTs
+    mapping(uint256 => uint256) private tokenIndex; // Index tracking for fast deletion
 
 
     // Primary Domain Mappings
@@ -108,7 +108,7 @@ contract InfinityNameUpgradeable is
         __UUPSUpgradeable_init();
 
         // Original constructor logic
-        price = 320000000000000; // 0.00032 ETH
+        price = 210000000000000; // 0.00021 ETH
         nextTokenId = 0;
         _suffix = ".up";
         feeRecipient = payable(0xf6547f77614F7dAf76e62767831d594b8a6e5e3b);
@@ -129,10 +129,10 @@ contract InfinityNameUpgradeable is
         string calldata domain,
         address referrer
     ) external payable whenNotPaused nonReentrant {
-        // ✅ ÖNCE referrer kontrolü (para kaybını önlemek için)
+        // ✅ FIRST referrer check (to prevent fund loss)
         if (referrer == msg.sender) revert InvalidReferrer();
         
-        // ✅ SONRA fiyat hesaplama
+        // ✅ THEN price calculation
         uint256 actualPrice = price;
         if (referrer != address(0)) {
             uint256 discount = (price * REFERRAL_DISCOUNT_PERCENT) / 10000;
@@ -201,7 +201,7 @@ contract InfinityNameUpgradeable is
     // ============ PRIMARY DOMAIN MANAGEMENT ============
 
     /**
-     * @dev Caller'ın sahip olduğu bir token'ı ana domain olarak ayarlar.
+     * @dev Sets a token owned by the caller as the primary domain.
      */
     function setPrimaryDomain(uint256 tokenId) external {
         if (_ownerOf(tokenId) == address(0)) revert DomainNotFound();
@@ -212,7 +212,7 @@ contract InfinityNameUpgradeable is
     }
 
     /**
-     * @dev Bir adrese ait ana domainin tam alan adını döndürür.
+     * @dev Returns the full domain name of the primary domain for an address.
      */
     function getPrimaryDomain(
         address owner
