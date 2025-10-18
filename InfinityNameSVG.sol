@@ -17,7 +17,6 @@ library InfinityNameSVG {
     function generateTokenURI(
         uint256 tokenId,
         string memory domain,
-        uint256 parentTokenId,
         string memory suffix
     ) internal pure returns (string memory) {
         return
@@ -28,7 +27,6 @@ library InfinityNameSVG {
                         generateTokenMetadata(
                             tokenId,
                             domain,
-                            parentTokenId,
                             suffix
                         )
                     )
@@ -42,24 +40,19 @@ library InfinityNameSVG {
     function generateTokenMetadata(
         uint256 tokenId,
         string memory domain,
-        uint256 parentTokenId,
         string memory suffix
     ) internal pure returns (string memory) {
-        bool isSubdomainToken = parentTokenId != 0;
-
         return
             string.concat(
                 '{"name":"',
                 domain,
                 '",',
-                '"description":"InfinityName ',
-                isSubdomainToken ? "Subdomain" : "Domain",
-                ' NFT - owned forever, no renewals required. Decentralized domain name system.",',
+                '"description":"InfinityName Domain NFT - owned forever, no renewals required. Decentralized domain name system.",',
                 '"attributes":',
-                generateAttributes(tokenId, domain, parentTokenId, suffix),
+                generateAttributes(tokenId, domain, suffix),
                 ",",
                 '"image":"data:image/svg+xml;base64,',
-                Base64.encode(bytes(generateSVG(domain, isSubdomainToken))),
+                Base64.encode(bytes(generateSVG(domain))),
                 '"}'
             );
     }
@@ -70,49 +63,32 @@ library InfinityNameSVG {
     function generateAttributes(
         uint256, // tokenId - unused but kept for interface consistency
         string memory domain,
-        uint256 parentTokenId,
         string memory suffix
     ) internal pure returns (string memory) {
-        bool isSubdomainToken = parentTokenId != 0;
         uint256 displayedLen = bytes(domain).length - bytes(suffix).length;
 
-        string memory baseAttributes = string.concat(
+        return string.concat(
             '[{"trait_type":"Domain","value":"',
             domain,
             '"},',
             '{"trait_type":"Length","value":',
             displayedLen.toString(),
             "},",
-            '{"trait_type":"Type","value":"',
-            isSubdomainToken ? "Subdomain" : "Domain",
-            ' NFT"}'
+            '{"trait_type":"Type","value":"Domain NFT"}]'
         );
-
-        if (isSubdomainToken) {
-            return
-                string.concat(
-                    baseAttributes,
-                    ',{"trait_type":"Parent Token","value":"',
-                    parentTokenId.toString(),
-                    '"}]'
-                );
-        }
-
-        return string.concat(baseAttributes, "]");
     }
 
     /**
      * @dev Generate SVG image for token
      */
     function generateSVG(
-        string memory domain,
-        bool isSubdomainToken
+        string memory domain
     ) internal pure returns (string memory) {
         return
             string.concat(
                 '<svg xmlns="http://www.w3.org/2000/svg" width="500" height="500" viewBox="0 0 500 500">',
-                getSVGDefs(isSubdomainToken),
-                getSVGContent(domain, isSubdomainToken),
+                getSVGDefs(),
+                getSVGContent(domain),
                 "</svg>"
             );
     }
@@ -120,12 +96,9 @@ library InfinityNameSVG {
     /**
      * @dev Generate SVG definitions section (gradients)
      */
-    function getSVGDefs(
-        bool isSubdomainToken
-    ) internal pure returns (string memory) {
-        string memory gradientStops = isSubdomainToken
-            ? '<stop offset="0%" stop-color="#4facfe"/><stop offset="100%" stop-color="#00f2fe"/>'
-            : '<stop offset="0%" stop-color="#667eea"/><stop offset="100%" stop-color="#764ba2"/>';
+    function getSVGDefs() internal pure returns (string memory) {
+        string memory gradientStops =
+            '<stop offset="0%" stop-color="#667eea"/><stop offset="100%" stop-color="#764ba2"/>';
 
         return
             string.concat(
@@ -139,12 +112,9 @@ library InfinityNameSVG {
      * @dev Generate SVG content section (shapes and text)
      */
     function getSVGContent(
-        string memory domain,
-        bool isSubdomainToken
+        string memory domain
     ) internal pure returns (string memory) {
-        string memory typeText = isSubdomainToken
-            ? "Subdomain NFT"
-            : "Forever Owned - No Renewals";
+        string memory typeText = "Forever Owned - No Renewals";
 
         return
             string.concat(
